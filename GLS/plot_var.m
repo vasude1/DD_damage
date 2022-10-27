@@ -1,0 +1,1 @@
+plot(elem_mat(:,step-1,1));

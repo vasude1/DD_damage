@@ -3,14 +3,14 @@
 
 delta_0 = 1.0;
 delta_f = 50.0;
-f=0.0; % Body force
+f=0.01; % Body force
 delta_t = 1E-2; % Time increment for dynamics
 
 beta=0.45;  % Numerical integration
 gamma = 0.8;    % Numerical integration
 
 % Discretization
-nnodes = 31;
+nnodes = 21;
 nsteps=2500;
 length = 1.0;
 nelements = nnodes-1; ne = nelements;
@@ -18,11 +18,13 @@ nele=linspace(1,nelements,nelements);
 nodal_coords = linspace(0,length,nnodes);
 le=length/nelements;
 area = ones(nelements,1);
-area(floor(nelements/2),1) = 0.97;
+%area(floor(nelements/2),1) = 1.0;
 
 %% Setup arrays for FE
 C=1E2;
+E_0=1E2;
 displacement = zeros(nnodes,1);
+mult_eq = zeros(nnodes,1);
 velocity = zeros(nnodes,1);
 acceleration = zeros(nnodes,1);
 
@@ -62,7 +64,7 @@ elem_mech = zeros(nelements,nsteps,2);
 elem_mat = zeros(nelements,nsteps,2);
 elem_damage = zeros(nelements,nsteps,2);
 elem_dissipation = zeros(nelements,nsteps,1);
-elem_lagrange = zeros(2*nnodes-4,nsteps,1);
+elem_lagrange = zeros(2*(nnodes-2),nsteps,1);
 node_beta = zeros(nelements,nsteps,1);
 elem_dist2 = zeros(nelements,nsteps,1);
 prev_node = 200*ones(nelements,nsteps,1);
@@ -71,6 +73,8 @@ exit_flags = zeros(nsteps,1);
 delem_mech = zeros(nelements,nsteps,1); % Why is this used?
 delem_mat = zeros(nelements,nsteps,1);  % why is this used?
 node_displacement = zeros(nnodes,nsteps,2); % Duplicate array?
+lag_mult_equ = zeros(nnodes,nsteps,1); 
+number_iter = zeros(nsteps,1);
 
 % FE parameters
 dist2 = zeros(nelements,1); % Stores the distance function at elements
@@ -87,6 +91,10 @@ for i = 1: nnodes-1
 end
 
 K(1:nnodes,1:nnodes) = B_u' * B_u;
+
+C_int = le*B_u(1:end-1,1:end-1);
+P = mtimes(C_int,B_u);
+
 rho=1.0;
 Mass = zeros(nnodes,nnodes);
 for i = 1:nnodes-1
@@ -103,7 +111,7 @@ Mass = zeros(nnodes,nnodes);
 u_d = zeros(nsteps,1);
 interval = length*linspace(0.8, 0.6,300);
 u_d(1:100,1)=length*linspace(0.0, 0.995,100 );
-u_d(101:end,1) = length*linspace(0.995, 1.5,nsteps-100 );
+u_d(101:end,1) = length*linspace(0.995, 2.0,nsteps-100 );
 
 
 %% Setup the solver
@@ -111,7 +119,7 @@ converge = false;
 redo_step = false;
 
 material = zeros(2*nelements,1);
-mechanical_st = zeros(2*nelements+1,1);
+mechanical_st = zeros(2*nnodes+nelements,1);
 ud = zeros(2,1);
 A_large = zeros(2*nnodes,nnodes+nelements);
 rhs_large = zeros(2*nnodes,1);
@@ -127,14 +135,16 @@ for i=1:nelements
    C_sig_lag(i,i) = 1.0;
    C_sig_lag(i+1,i) = -1.0;
 end
-
+eta = zeros(nnodes,1);
 
 %% Begin the solver
 
 for step = 1:nsteps
     fprintf('Step = %d \n',step);
     fprintf('u_d = %f \n',u_d(step,1));
+    count = 0;
     while(~converge)
+        count = count+1;
         epsilon_t(:,:) = epsilon_temp(:,:);
         sigma_t(:,:) = sigma_temp(:,:);
 
@@ -149,37 +159,29 @@ for step = 1:nsteps
 
         mechanical_st(1:nnodes,1) = displacement(:,1);
         mechanical_st(nnodes+1:nnodes+nelements,1) = sigma(:,1);
-
-        [solution,fval,exitflag,lambda_] = call_minimizer(B_u,bfv,le,nelements,ud,mechanical_st,material,Mass_sigma,C,area,C_sig_lag);
+        mechanical_st(nnodes+nelements+1:2*nnodes+nelements,1) = mult_eq(:,1);
+        
+        hessian_precom = hessian(mechanical_st,B_u,Mass_sigma,nelements,C,area,C_sig_lag);
+        
+        [solution,fval,exitflag,lambda_] = call_minimizer(B_u,bfv,le,nelements,ud,mechanical_st,material,Mass_sigma,C,area,C_sig_lag,hessian_precom);
 
         displacement = solution(1:nnodes);
         sigma = solution(nnodes+1:nnodes+nelements);
         epsilon = mtimes(B_u,displacement);
-
+        mult_eq = solution(nnodes+nelements+1:end);
+                
         acceleration = 1.0/beta/(delta_t*delta_t)*(displacement - u_pred);
         velocity = v_pred + gamma*delta_t*acceleration;
-
+        
         % Find the closest material point
         for i = 1:nelements
             FE_point = [epsilon(i,1),sigma(i,1),0.5*sigma(i,1)*epsilon(i,1)];
             prev_state= [prev_epsilon_t(i,1),prev_sigma_t(i,1),prev_energy(i,1),prev_damage(i,1),prev_dissipation(i,1)];
             dam_mod = C*(1-prev_damage(i,1));
-            % sig_1=0; eps_1=0; dam_1=0;
-            % sig_2=0; eps_2=0; dam_2=0;
-
-%             if(FE_point[0]<=delta_0):
-%                 eps_1 = (C*C*FE_point[0] + dam_mod*FE_point[1])/(C*C+dam_mod*dam_mod)
-%                 sig_1 = dam_mod*eps_1
-%                 dam_1 = prev_damage[i,0]
-%
-%             if(FE_point[0]>=delta_0):
-%                 eps_1 = (C*C*FE_point[0] + dam_mod*FE_point[1])/(C*C+dam_mod*dam_mod)
-%                 sig_1 = (dam_mod*eps_1>prev_sigma_t[i,0])*1E6+(dam_mod*eps_1<prev_sigma_t[i,0])*dam_mod*eps_1
-%                 dam_1 = prev_damage[i,0]
-
+            
             eps_2=1E9; sig_2=1E9; dam_2=0.0;
             if(prev_damage(i,1)>0.0 || FE_point(1)>=delta_0)
-                m=C*delta_0/(delta_0-delta_f); c=-delta_f*m;
+                m=E_0*delta_0/(delta_0-delta_f); c=-delta_f*m;
                 eps_2 = (C*C*FE_point(1)+m*FE_point(2)-m*c)/(m*m+C*C);
                 if(eps_2<delta_0)
                     eps_2=delta_0;
@@ -194,8 +196,8 @@ for step = 1:nsteps
                 end         
             end
 
-            eps_1 = (C*C*FE_point(1) + dam_mod*FE_point(2))/(C*C+dam_mod*dam_mod);
-            sig_1 = dam_mod*eps_1;
+            eps_1 = (C*C*FE_point(1) + E_0*FE_point(2))/(C*C+E_0*E_0);
+            sig_1 = E_0*eps_1;
             dam_1 = prev_damage(i,1);
 
             if(sig_1>sig_2)
@@ -212,19 +214,9 @@ for step = 1:nsteps
             sigma_temp(i,1) = (dist1>dist2)*sig_2+(dist1<=dist2)*sig_1;
             damage(i,1) = (dist1>dist2)*dam_2+(dist1<=dist2)*dam_1;
 
-%             data = generate_data(prev_state,1E2,500,1.0)
-%             arg,temp = closest_node(FE_point,prev_state,data,C,le) #(1-damage[i,0])*
-%             arg,temp = closest_node_graph(FE_point,prev_node[i,step-1,0],data,G,C,le)
-%             epsilon_temp[i,0] = data[arg,0]
-%             sigma_temp[i,0] = data[arg,1]
-%             energy[i,0] = data[arg,2]
-%             damage[i,0] = data[arg,3]
-%             dissipation[i,0] = data[arg,4]
-%             dist2[i,0]+=temp
-%             node_temp[i,0] = arg
-%         print(np.linalg.norm(sigma_t[:]-sigma_temp[:]))
         end
-        if(norm(sigma_t-sigma_temp)<1E-4)
+        disp(norm(sigma_t-sigma_temp)/(max(sigma_temp)+0.001));
+        if(norm(sigma_t-sigma_temp)/(max(sigma_temp)+0.001)<1E-6)
 
             prev_epsilon(:) = epsilon(:);
             prev_sigma(:) = sigma(:);
@@ -245,7 +237,7 @@ for step = 1:nsteps
             converge=true;
         end
     end
-
+    number_iter(step,1)=count;
     elem_mech(:,step,1) = epsilon(:,1);
     elem_mech(:,step,2) = sigma(:,1);
     elem_mat(:,step,1) = epsilon_temp(:,1);
@@ -253,7 +245,8 @@ for step = 1:nsteps
     elem_damage(:,step,1) = damage(:,1);
     elem_dissipation(:,step,1) = dissipation(:,1);
     node_displacement(:,step,1) = displacement(:,1);
-    elem_lagrange(:,step,1) = lambda_.ineqlin(1:2*(nnodes-2));
+    lag_mult_equ(:,step,1) = mult_eq(:,1);
+    elem_lagrange(:,step,1) = lambda_.eqlin;
     exit_flags(step,1) = exitflag;
     converge=false;
 end

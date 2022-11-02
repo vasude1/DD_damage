@@ -1,4 +1,4 @@
-function hess = hessian(x,B,Mass_sigma,nelements,C,area,C_sig_lag)
+function hess_ = hessian(x,B,Mass_sigma,nelements,C,area,C_sig_lag)
     C_sig_lag_ar = (area.*C_sig_lag')';
     nnodes = nelements+1;
     hess = zeros(2*nnodes+nelements,2*nnodes+nelements);
@@ -6,4 +6,5 @@ function hess = hessian(x,B,Mass_sigma,nelements,C,area,C_sig_lag)
     hess(nnodes+1:nnodes+nelements,nnodes+1:nnodes+nelements) = 1.0/C*  mtimes(Mass_sigma,diag(area)); 
     hess(nnodes+1:nnodes+nelements,nnodes+nelements+1:2*nnodes+nelements) = C_sig_lag_ar'; 
     hess(nnodes+nelements+1:2*nnodes+nelements,nnodes+1:nnodes+nelements) = hess(nnodes+1:nnodes+nelements,nnodes+nelements+1:2*nnodes+nelements)'; 
+    hess_ = hess; %sparse(hess);
 end
